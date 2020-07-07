@@ -11,22 +11,20 @@ noria = { path = "/Users/eleonorakiziv/rust/noria/noria/noria-server", package =
 slog = { version = "2.4.0", features = ["max_level_trace", "release_max_level_trace"] }
 slog-term = "2.4.0"
 
-tokio = "0.1.22"
+tokio = "0.1"
 tower = "0.1.1"
 tower-balance = { git = "https://github.com/tower-rs/tower.git", rev = "793e2e8e"}
-tokio-tower = { git = "https://github.com/tower-rs/tokio-tower.git", rev = "2e1d40903b9a294d8c984612400838dcdc8fd758"}
+tokio-tower = { git = "https://github.com/tower-rs/tokio-tower.git", rev = "2e1d40903b9a294d8c984612400838dcdc8fd758" }
 tower-service = "0.2"
 tower-load = { git = "https://github.com/tower-rs/tower.git", rev = "793e2e8e"}
 
+rand = "0.7.2"
+fake = { version = "2.2", features=['chrono']}
+chrono = { version = "0.4.0", features = ["serde"] }
+
+[patch.'https://github.com/tower-rs/tokio-tower.git']
+tokio-tower = { git = "https://github.com/ms705/tokio-tower.git", branch = "patched-for-old-noria" }
 
 
 
-
-
-
-
-
-
-
-# noria = { git = "https://github.com/mit-pdos/noria", branch="add-parent" }
 
