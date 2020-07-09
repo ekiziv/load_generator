@@ -63,7 +63,7 @@ fn main() {
     // read table names
     let mut names: Vec<String> = Vec::new();
     let buffered = BufReader::new(
-        File::open("/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/info.txt").unwrap(),
+        File::open("/home/ekiziv/websubmit-rs/info.txt").unwrap(),
     );
     for line in buffered.lines() {
         let name = line.unwrap().to_string();
@@ -75,9 +75,10 @@ fn main() {
 
     // instantiate Noria
     let backend = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
+    
+    let num_requests = 3000;
+    let qids: Vec<u64> = (0..num_requests).collect();
 
-    let qids: Vec<u64> = (0..1000).collect();
-    let num_requests = 1000;
 
     // fetch table handlers
     let mut table_handlers: HashMap<String, SyncTable> = {
@@ -172,7 +173,7 @@ fn read(rx: Receiver<(String, u64)>, num_rq: u64, view: &mut SyncView) {
     let mut i = 0;
 
     while i <= num_rq {
-        if i == 200 {
+        if i == 500 {
             println!("!!!!!!!!!!!!!NOW!!!!!!!!!!!!!!!!")
         }
         let (email, q) = rx.recv().unwrap();
