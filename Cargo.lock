@@ -495,6 +495,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "gen"
+version = "0.1.0"
+dependencies = [
+ "chrono 0.4.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fake 2.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "noria-server 0.2.0",
+ "rand 0.7.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "slog 2.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "slog-term 2.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio 0.1.22 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio-tower 0.1.1 (git+https://github.com/ms705/tokio-tower.git?branch=patched-for-old-noria)",
+ "tower 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tower-balance 0.1.0 (git+https://github.com/tower-rs/tower.git?rev=793e2e8e)",
+ "tower-load 0.1.0 (git+https://github.com/tower-rs/tower.git?rev=793e2e8e)",
+ "tower-service 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "generator"
 version = "0.6.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -721,24 +739,6 @@ dependencies = [
  "cc 1.0.57 (registry+https://github.com/rust-lang/crates.io-index)",
  "glob 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.71 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "load_balancer"
-version = "0.1.0"
-dependencies = [
- "chrono 0.4.12 (registry+https://github.com/rust-lang/crates.io-index)",
- "fake 2.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "noria-server 0.2.0",
- "rand 0.7.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "slog 2.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "slog-term 2.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio 0.1.22 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio-tower 0.1.1 (git+https://github.com/ms705/tokio-tower.git?branch=patched-for-old-noria)",
- "tower 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "tower-balance 0.1.0 (git+https://github.com/tower-rs/tower.git?rev=793e2e8e)",
- "tower-load 0.1.0 (git+https://github.com/tower-rs/tower.git?rev=793e2e8e)",
- "tower-service 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1064,6 +1064,13 @@ dependencies = [
  "rustc_version 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "smallvec 0.6.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "winapi 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "parser"
+version = "0.1.0"
+dependencies = [
+ "chrono 0.4.12 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

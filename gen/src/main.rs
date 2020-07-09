@@ -20,7 +20,7 @@ use slog::Drain;
 use slog::Logger;
 use slog_term::term_full;
 use std::collections::HashMap;
-use std::convert::TryInto;
+
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -28,14 +28,16 @@ use std::io::{BufRead, BufReader};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use std::{thread, time};
+
+use std::thread;
 
 pub struct NoriaBackend {
     pub handle: SyncControllerHandle<ZookeeperAuthority, tokio::runtime::TaskExecutor>,
     pub executor: tokio::runtime::TaskExecutor,
     pub runtime: tokio::runtime::Runtime,
 }
+
+const UNSUB: usize = 10;
 
 impl NoriaBackend {
     pub fn new() -> Result<NoriaBackend, std::io::Error> {
@@ -76,8 +78,10 @@ fn main() {
     // instantiate Noria
     let backend = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
 
-    let qids: Vec<u64> = (0..1000).collect();
-    let num_requests = 1000;
+    let first = 1000;
+    let second = 2000;
+    let total = first + second;
+    let qids: Vec<u64> = (0..total).collect();
 
     // fetch table handlers
     let mut table_handlers: HashMap<String, SyncTable> = {
@@ -104,11 +108,11 @@ fn main() {
 
     let mut threads = Vec::new();
     let (tx, rx) = mpsc::channel();
-    let wid = thread::spawn(move || write(tx, names, qids, num_requests, &mut table_handlers));
+    let wid = thread::spawn(move || write(tx, names, qids, first, second, &mut table_handlers));
 
     threads.push(wid);
 
-    let rid = thread::spawn(move || read(rx, num_requests, &mut view));
+    let rid = thread::spawn(move || read(rx, total, &mut view));
     threads.push(rid);
 
     // waiting for both threads to finish
@@ -118,23 +122,24 @@ fn main() {
 
     let mut users_view: SyncView = {
         let mut bg = backend.lock().unwrap();
-        bg.handle.view("all_users").unwrap().into_sync()
+        bg.handle.view("answers_by_lec").unwrap().into_sync()
     };
     let res = users_view.lookup(&[(0 as u64).into()], true).unwrap();
-    assert_eq!(res.len(), 50);
+    println!("Num of answers is {:?}", res.len());
 }
 
 fn write(
     tx: Sender<(String, u64)>,
     names: Vec<String>,
     qids: Vec<u64>,
-    num_rq: u64,
+    first_wave: u64,
+    second_wave: u64,
     handlers: &mut HashMap<String, SyncTable>,
 ) {
+    // first wave
     use fake::faker::lorem::en::*;
     let mut i = 0;
-    while i <= num_rq {
-        let start = Instant::now();
+    while i <= first_wave {
         // pick a random user, write to its table
         let name = names.choose(&mut rand::thread_rng()).unwrap();
         let qid: &u64 = qids.choose(&mut rand::thread_rng()).unwrap();
@@ -142,7 +147,6 @@ fn write(
 
         // record the time since the previous request
         let new_ts = Local::now().naive_local();
-        println!("{:?}", new_ts);
         let ts: DataType = DataType::Timestamp(new_ts);
 
         let rec: Vec<DataType> = vec![
@@ -156,11 +160,37 @@ fn write(
         (table)
             .insert(rec)
             .expect("failed to insert into answers table");
-        // let to_sleep =
-        //     time::Duration::new(0, 100_000_000).checked_sub(Instant::now().duration_since(start));
-        // if to_sleep.is_some() {
-        //     thread::sleep(to_sleep.unwrap());
-        // }
+        let tuple = ((*name).clone(), (*qid).clone());
+        tx.send(tuple).unwrap();
+        i += 1;
+    }
+    println!("__________________________________________________________");
+    println!("Second wave");
+    println!("__________________________________________________________");
+    // second wave
+    i = 0;
+    while i <= second_wave {
+        // pick a random user, write to its table
+        let updated_names: Vec<String> = (&names[..names.len() - UNSUB]).to_vec();
+        let name = updated_names.choose(&mut rand::thread_rng()).unwrap();
+        let qid: &u64 = qids.choose(&mut rand::thread_rng()).unwrap();
+        let answer: String = Sentence(5..7).fake();
+
+        // record the time since the previous request
+        let new_ts = Local::now().naive_local();
+        let ts: DataType = DataType::Timestamp(new_ts);
+
+        let rec: Vec<DataType> = vec![
+            (*name).clone().into(),
+            0.into(),
+            (*qid).clone().into(),
+            answer.clone().into(),
+            ts.into(),
+        ];
+        let table = handlers.get_mut(name).unwrap();
+        (table)
+            .insert(rec)
+            .expect("failed to insert into answers table");
         let tuple = ((*name).clone(), (*qid).clone());
         tx.send(tuple).unwrap();
         i += 1;
@@ -172,9 +202,6 @@ fn read(rx: Receiver<(String, u64)>, num_rq: u64, view: &mut SyncView) {
     let mut i = 0;
 
     while i <= num_rq {
-        if i == 200 {
-            println!("!!!!!!!!!!!!!NOW!!!!!!!!!!!!!!!!")
-        }
         let (email, q) = rx.recv().unwrap();
         let mut res = Vec::new();
 
@@ -202,32 +229,13 @@ fn read(rx: Receiver<(String, u64)>, num_rq: u64, view: &mut SyncView) {
     println!("Done!");
 
     end_times.sort_by_key(|k| k.0);
-
-    let mut latency_file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create(true)
-        .open("latency.txt")
-        .unwrap();
-    let mut interval_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open("intervals.txt")
+        .open("end_times.txt")
         .unwrap();
 
-    let mut prev = end_times[0].0;
-    println!("length of end_times: {:?}", end_times.len());
     for (start, end) in end_times.into_iter() {
-        let interval = start.signed_duration_since(prev).num_milliseconds();
-        if interval < 0 {
-            println!(
-                "time since the last element is negative. start: {:?}, prev: {:?}",
-                start.clone(),
-                prev.clone()
-            );
-        }
-        prev = start;
-        let latency = end.signed_duration_since(start).num_milliseconds();
-        let _err = write!(&mut latency_file, "{}\n", latency);
-        let _err = write!(&mut interval_file, "{}\n", interval);
+        write!(&mut file, "{:?}#{:?}\n", start, end).expect("failed to write");
     }
 }
