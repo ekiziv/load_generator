@@ -76,19 +76,19 @@ fn main() {
             );
         }
         prev = start;
-        if s_time.lt(&start) && !start_recorded {
-            write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
-            start_recorded = true;
-            println!(
-                "recorded start, s_time is {:?} and start is {:?}",
-                s_time, start
-            );
+        if s_time < start {
+            if !start_recorded {
+                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+                start_recorded = true;
+                println!("recorded start next to {:?}", start); 
+            }
+            if e_time < end && !end_recorded {
+                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+                end_recorded = true; 
+                println!("recorded end, e_time is {:?} and end is {:?}", e_time, end);
+            }
         }
-        if e_time.lt(&end) && !end_recorded {
-            write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
-            end_recorded = true;
-            println!("recorded end, e_time is {:?} and end is {:?}", e_time, end);
-        }
+
         let latency = end.signed_duration_since(start).num_milliseconds();
         write!(&mut latency_file, "{}\n", latency).expect("failed to write into latency file");
         write!(&mut interval_file, "{}\n", interval).expect("failed to write into interval file");
