@@ -77,14 +77,9 @@ fn main() {
 
     // instantiate Noria
     let backend = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
-    
-    let num_requests = 3000;
-    let qids: Vec<u64> = (0..num_requests).collect();
 
-    let first = 1000;
-    let second = 2000;
-    let total = first + second;
-    let qids: Vec<u64> = (0..total).collect();
+    let num_rq = 1000;
+    let qids: Vec<u64> = (0..(3 * num_rq)).collect();
 
     // fetch table handlers
     let mut table_handlers: HashMap<String, SyncTable> = {
@@ -111,11 +106,11 @@ fn main() {
 
     let mut threads = Vec::new();
     let (tx, rx) = mpsc::channel();
-    let wid = thread::spawn(move || write(tx, names, qids, first, second, &mut table_handlers));
+    let wid = thread::spawn(move || write(tx, names, qids, num_rq, &mut table_handlers));
 
     threads.push(wid);
 
-    let rid = thread::spawn(move || read(rx, total, &mut view));
+    let rid = thread::spawn(move || read(rx, 5 * num_rq, &mut view));
     threads.push(rid);
 
     // waiting for both threads to finish
@@ -135,14 +130,13 @@ fn write(
     tx: Sender<(String, u64)>,
     names: Vec<String>,
     qids: Vec<u64>,
-    first_wave: u64,
-    second_wave: u64,
+    num_rq: u64,
     handlers: &mut HashMap<String, SyncTable>,
 ) {
     // first wave
     use fake::faker::lorem::en::*;
     let mut i = 0;
-    while i <= first_wave {
+    while i <= num_rq {
         // pick a random user, write to its table
         let name = names.choose(&mut rand::thread_rng()).unwrap();
         let qid: &u64 = qids.choose(&mut rand::thread_rng()).unwrap();
@@ -168,11 +162,16 @@ fn write(
         i += 1;
     }
     println!("__________________________________________________________");
-    println!("Second wave");
+    println!("Start unsubscription");
     println!("__________________________________________________________");
     // second wave
     i = 0;
-    while i <= second_wave {
+    while i <= 4 * num_rq {
+        if i == 2 * num_rq {
+            println!("__________________________________________________________");
+            println!("Done unsubscription. Start resubscription!");
+            println!("__________________________________________________________");
+        }
         // pick a random user, write to its table
         let updated_names: Vec<String> = (&names[..names.len() - UNSUB]).to_vec();
         let name = updated_names.choose(&mut rand::thread_rng()).unwrap();

@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{NaiveDateTime, Utc};
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -17,10 +17,89 @@ fn main() {
         .unwrap();
 
     // read the times when the unsubscription happens
-    let mut unsub = Vec::new();
-    let unsub_times = BufReader::new(
-        File::open("/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/un_times.txt").unwrap(),
+    let (un_start, un_end) = extract_action_time_interval(
+        "/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/un_times.txt",
     );
+    let (re_start, re_end) = extract_action_time_interval(
+        "/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/re_times.txt",
+    );
+
+    // get all the end_times
+    let mut end_times: Vec<(NaiveDateTime, NaiveDateTime)> = Vec::new();
+    let buffered_end_times = BufReader::new(
+        File::open("/Users/eleonorakiziv/rust/websubmit-rs/load_generator/end_times.txt").unwrap(),
+    );
+    for line in buffered_end_times.lines() {
+        let unwrapped = line.unwrap().clone();
+        let start = unwrapped.split('#').nth(0).unwrap();
+        let end = unwrapped.split('#').nth(1);
+        if end.is_none() {
+            continue;
+        }
+        let start_time = NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S%.f")
+            .expect("failed to parse from string");
+        let end_time = NaiveDateTime::parse_from_str(end.unwrap(), "%Y-%m-%dT%H:%M:%S%.f")
+            .expect("failed to parse from string");
+        end_times.push((start_time, end_time));
+    }
+    println!("Done parsing end_times");
+
+    let mut prev = end_times[0].0;
+    let mut start_un_recorded = false;
+    let mut end_un_recorded = false;
+    let mut start_re_recorded = false;
+    let mut end_re_recorded = false;
+
+    for (start, end) in end_times.into_iter() {
+        let interval = start.signed_duration_since(prev).num_milliseconds();
+        if interval < 0 {
+            println!(
+                "time since the last element is negative. start: {:?}, prev: {:?}",
+                start.clone(),
+                prev.clone()
+            );
+        }
+        prev = start;
+        if un_start < start {
+            if !start_un_recorded {
+                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+                start_un_recorded = true;
+                println!("recorded start un next to {:?}", start);
+            }
+            if un_end < end && !end_un_recorded {
+                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+                end_un_recorded = true;
+                println!(
+                    "recorded end un e_time is {:?} and end is {:?}",
+                    un_end, end
+                );
+            }
+        }
+        if re_start < start {
+            if !start_re_recorded {
+                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+                start_re_recorded = true;
+                println!("recorded start re next to {:?}", start);
+            }
+            if re_end < end && !end_re_recorded {
+                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+                end_re_recorded = true;
+                println!(
+                    "recorded end re e_time is {:?} and end is {:?}",
+                    re_end, end
+                );
+            }
+        }
+
+        let latency = end.signed_duration_since(start).num_milliseconds();
+        write!(&mut latency_file, "{}\n", latency).expect("failed to write into latency file");
+        write!(&mut interval_file, "{}\n", interval).expect("failed to write into interval file");
+    }
+}
+
+fn extract_action_time_interval(file: &str) -> (NaiveDateTime, NaiveDateTime) {
+    let mut unsub = Vec::new();
+    let unsub_times = BufReader::new(File::open(file).unwrap());
     for line in unsub_times.lines() {
         unsub.push(line.unwrap());
     }
@@ -44,53 +123,5 @@ fn main() {
         i += 1
     }
     println!("Done parsing unsub");
-
-    // get all the end_times
-    let mut end_times: Vec<(NaiveDateTime, NaiveDateTime)> = Vec::new();
-    let buffered_end_times = BufReader::new(
-        File::open("/Users/eleonorakiziv/rust/websubmit-rs/load_generator/end_times.txt").unwrap(),
-    );
-    for line in buffered_end_times.lines() {
-        let unwrapped = line.unwrap().clone();
-        let start = unwrapped.split('#').nth(0).unwrap();
-        let start_time = NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S%.f")
-            .expect("failed to parse from string");
-
-        let end = unwrapped.split('#').nth(1).unwrap();
-        let end_time = NaiveDateTime::parse_from_str(end, "%Y-%m-%dT%H:%M:%S%.f")
-            .expect("failed to parse from string");
-        end_times.push((start_time, end_time));
-    }
-    println!("Done parsing end_times");
-
-    let mut prev = end_times[0].0;
-    let mut start_recorded = false;
-    let mut end_recorded = false;
-    for (start, end) in end_times.into_iter() {
-        let interval = start.signed_duration_since(prev).num_milliseconds();
-        if interval < 0 {
-            println!(
-                "time since the last element is negative. start: {:?}, prev: {:?}",
-                start.clone(),
-                prev.clone()
-            );
-        }
-        prev = start;
-        if s_time < start {
-            if !start_recorded {
-                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
-                start_recorded = true;
-                println!("recorded start next to {:?}", start); 
-            }
-            if e_time < end && !end_recorded {
-                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
-                end_recorded = true; 
-                println!("recorded end, e_time is {:?} and end is {:?}", e_time, end);
-            }
-        }
-
-        let latency = end.signed_duration_since(start).num_milliseconds();
-        write!(&mut latency_file, "{}\n", latency).expect("failed to write into latency file");
-        write!(&mut interval_file, "{}\n", interval).expect("failed to write into interval file");
-    }
+    (s_time, e_time)
 }
