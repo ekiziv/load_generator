@@ -16,13 +16,13 @@ fn main() {
         .open("intervals.txt")
         .unwrap();
 
-    // read the times when the unsubscription happens
-    let (un_start, un_end) = extract_action_time_interval(
-        "/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/un_times.txt",
-    );
-    let (re_start, re_end) = extract_action_time_interval(
-        "/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/re_times.txt",
-    );
+    // // read the times when the unsubscription happens
+    // let (un_start, un_end) = extract_action_time_interval(
+    //     "/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/un_times.txt",
+    // );
+    // let (re_start, re_end) = extract_action_time_interval(
+    //     "/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/re_times.txt",
+    // );
 
     // get all the end_times
     let mut end_times: Vec<(NaiveDateTime, NaiveDateTime)> = Vec::new();
@@ -42,13 +42,12 @@ fn main() {
             .expect("failed to parse from string");
         end_times.push((start_time, end_time));
     }
-    println!("Done parsing end_times");
 
     let mut prev = end_times[0].0;
-    let mut start_un_recorded = false;
-    let mut end_un_recorded = false;
-    let mut start_re_recorded = false;
-    let mut end_re_recorded = false;
+    // let mut start_un_recorded = false;
+    // let mut end_un_recorded = false;
+    // let mut start_re_recorded = false;
+    // let mut end_re_recorded = false;
 
     for (start, end) in end_times.into_iter() {
         let interval = start.signed_duration_since(prev).num_milliseconds();
@@ -60,38 +59,39 @@ fn main() {
             );
         }
         prev = start;
-        if un_start < start {
-            if !start_un_recorded {
-                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
-                start_un_recorded = true;
-                println!("recorded start un next to {:?}", start);
-            }
-            if un_end < end && !end_un_recorded {
-                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
-                end_un_recorded = true;
-                println!(
-                    "recorded end un e_time is {:?} and end is {:?}",
-                    un_end, end
-                );
-            }
-        }
-        if re_start < start {
-            if !start_re_recorded {
-                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
-                start_re_recorded = true;
-                println!("recorded start re next to {:?}", start);
-            }
-            if re_end < end && !end_re_recorded {
-                write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
-                end_re_recorded = true;
-                println!(
-                    "recorded end re e_time is {:?} and end is {:?}",
-                    re_end, end
-                );
-            }
-        }
-
         let latency = end.signed_duration_since(start).num_milliseconds();
+        // if un_start < start {
+        //     if !start_un_recorded {
+        //         write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+        //         start_un_recorded = true;
+        //         println!("recorded start un next to {:?}", start);
+        //     }
+        //     if un_end < end && !end_un_recorded {
+        //         write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+        //         end_un_recorded = true;
+        //         println!(
+        //             "recorded end un e_time is {:?} and end is {:?}",
+        //             un_end, end
+        //         );
+        //     }
+        // }
+        // if re_start < start {
+        //     if !start_re_recorded {
+        //         write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+        //         start_re_recorded = true;
+        //         println!("recorded start re next to {:?}", start);
+        //     }
+        //     println!("latency: {:?}", latency);
+        //     if re_end < end && !end_re_recorded {
+        //         write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
+        //         end_re_recorded = true;
+        //         println!(
+        //             "recorded end re e_time is {:?} and end is {:?}",
+        //             re_end, end
+        //         );
+        //     }
+        // }
+
         write!(&mut latency_file, "{}\n", latency).expect("failed to write into latency file");
         write!(&mut interval_file, "{}\n", interval).expect("failed to write into interval file");
     }

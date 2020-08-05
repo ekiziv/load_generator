@@ -8,8 +8,9 @@ edition = "2018"
 
 [dependencies]
 noria = { path = "/Users/eleonorakiziv/rust/noria/noria/noria-server", package = "noria-server" }
-slog = { version = "2.4.0", features = ["max_level_trace", "release_max_level_trace"] }
+# slog = { version = "2.4.0", features = ["max_level_trace", "release_max_level_trace"] }
 slog-term = "2.4.0"
+slog = "2.4.0"
 
 tokio = "0.1"
 tower = "0.1.1"
@@ -21,6 +22,20 @@ tower-load = { git = "https://github.com/tower-rs/tower.git", rev = "793e2e8e"}
 rand = "0.7.2"
 fake = { version = "2.2", features=['chrono']}
 chrono = { version = "0.4.0", features = ["serde"] }
+
+dashmap = "3.11.9"
+crossbeam-queue = "0.2.3"
+crossbeam-channel = "0.4.3"
+futures = "0.1.16"
+stream-cancel = "0.4"
+failure = "0.1.1"
+
+
+
+
+
+
+
 
 
 
