@@ -17,6 +17,7 @@ use chrono::Local;
 use chrono::NaiveDateTime;
 use fake::Fake;
 use futures::{self, Future, Stream};
+use noria::prelude::SyncTable;
 use noria::{DataType, SyncView};
 use noria::{SyncControllerHandle, ZookeeperAuthority};
 use rand::seq::SliceRandom;
@@ -49,7 +50,7 @@ pub struct NoriaBackend {
 
 const FACTOR: u64 = 5;
 const NUM_RQ: u64 = 1000;
-const EVERY: Duration = Duration::from_millis(500);
+const EVERY: Duration = Duration::from_millis(50);
 
 impl NoriaBackend {
     pub fn new() -> Result<NoriaBackend, std::io::Error> {
@@ -104,8 +105,13 @@ fn main() {
     let main_backend = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
     let (a_s1, a_r1) = unbounded();
     let (a_s2, a_r2) = (a_s1.clone(), a_r1.clone());
-    for name in names.clone().into_iter() {
-        a_s1.send(name).unwrap();
+    {
+        let mut bg = main_backend.lock().unwrap();
+        for name in names.clone().into_iter() {
+            let table_name = format!("answers_{}", name.clone());
+            let handle = bg.handle.table(&table_name).unwrap().into_sync();
+            a_s1.send((Arc::new(Mutex::new(handle)), name)).unwrap();
+        }
     }
 
     let qids: Vec<u64> = (0..((FACTOR + 1) * NUM_RQ)).collect();
@@ -174,11 +180,24 @@ fn write(
     qids: Vec<u64>,
     trigger: Trigger,
     backend: Arc<Mutex<NoriaBackend>>,
-    sender: Sender<String>,
-    receiver: Receiver<String>,
+    sender: Sender<(Arc<Mutex<SyncTable>>, String)>,
+    receiver: Receiver<(Arc<Mutex<SyncTable>>, String)>,
     signal: MPSCSender<bool>,
 ) {
+    let mut handlers: HashMap<String, SyncTable> = {
+        let mut bg = backend.lock().unwrap();
+        names
+            .clone()
+            .into_iter()
+            .map(|e| {
+                let table_name = format!("answers_{}", e.clone());
+                let handle = &mut (bg.handle.table(&table_name).unwrap().into_sync());
+                (e.clone(), handle.clone())
+            })
+            .collect()
+    };
     let mut bg = backend.lock().unwrap();
+
     // first wave
     use fake::faker::lorem::en::*;
     let mut i = 0;
@@ -199,10 +218,8 @@ fn write(
             answer.clone().into(),
             ts.into(),
         ];
-        let table_name = format!("answers_{}", name.clone());
-        let handle = &mut (bg.handle.table(&table_name).unwrap().into_sync());
-
-        handle
+        let table = handlers.get_mut(name).unwrap();
+        table
             .insert(rec)
             .expect("failed to insert into answers table");
         let tuple = ((*name).clone(), (*qid).clone());
@@ -217,10 +234,11 @@ fn write(
     while i <= FACTOR * NUM_RQ {
         // let name = names.choose(&mut rand::thread_rng()).unwrap();
         select! {
-          recv(receiver) -> n => {
-            let name = n.unwrap();
-            let table_name = format!("answers_{}", name.clone());
-            let handle = &mut (bg.handle.table(&table_name).unwrap().into_sync());
+          recv(receiver) -> msg => {
+            let info = msg.unwrap();
+            let raw_handle = info.0;
+            let mut handle = raw_handle.lock().unwrap();
+            let name = info.1;
 
             let qid: &u64 = qids.choose(&mut rand::thread_rng()).unwrap();
             let answer: String = Sentence(5..7).fake();
@@ -239,7 +257,8 @@ fn write(
 
             let tuple = (name.clone(), (*qid).clone());
             tx.send(tuple).unwrap();
-            sender.send(name).unwrap();
+            drop(handle);
+            sender.send((raw_handle, name)).unwrap();
             i += 1;
           },
           default => println!("skipping a turn in write"),
@@ -294,12 +313,12 @@ fn read(rx: MPSCReceiver<(String, u64)>, view: &mut SyncView) {
 
 fn do_every(
     backend: Arc<Mutex<NoriaBackend>>,
-    info_map: HashMap<String, Vec<u32>>,
+    map: HashMap<String, Vec<u32>>,
     names: Vec<String>,
     valve: &Valve,
     view: SyncView,
-    sender: Sender<String>,
-    receiver: Receiver<String>,
+    sender: Sender<(Arc<Mutex<SyncTable>>, String)>,
+    receiver: Receiver<(Arc<Mutex<SyncTable>>, String)>,
     signal: MPSCReceiver<bool>,
 ) {
     signal.recv().unwrap();
@@ -308,22 +327,23 @@ fn do_every(
     let imported = DashMap::new();
 
     let to_resub = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
+    let info_map = Arc::new(Mutex::new(map));
 
     let lease_action = move || -> Result<(), failure::Error> {
-        let mut bg = backend.lock().unwrap();
         let unsubscribe = flip_coin();
-
+        let mut bg = backend.lock().unwrap();
         let to_re = to_resub.lock().unwrap();
-
         let mut view = users_view.lock().unwrap();
+        let mut info_map = info_map.lock().unwrap();
         let res = view.lookup(&[(0 as u64).into()], true).unwrap();
         println!("Number of answers: {:?}", res.len());
 
         if unsubscribe {
             select! {
-              recv(receiver) -> u => {
-                let user = u.unwrap();
-                let tables: &Vec<u32> = info_map.get(&user).unwrap();
+              recv(receiver) -> msg => {
+                let info = msg.unwrap();
+                let user = info.1;
+                let tables: Vec<u32> = info_map.remove(&user).unwrap();
                 let data = bg
                     .handle
                     .export_data(tables.clone())
@@ -331,7 +351,7 @@ fn do_every(
                 imported.insert(user.to_string(), data);
                 for table in tables.into_iter() {
                     bg.handle
-                        .unsubscribe(*table)
+                        .unsubscribe(table)
                         .expect("failed to unsubscribe");
                 }
                 to_re.push(user).expect("failed to insert");
@@ -346,10 +366,13 @@ fn do_every(
             let user = to_re.pop().unwrap();
             {
                 let data = imported.get(&user).unwrap();
-                bg.handle.import_data((*data).to_string()).unwrap();
+                let new_tables: Vec<u32> = bg.handle.import_data((*data).to_string()).unwrap();
+                info_map.insert(user.clone(), new_tables);
             }
-            imported.remove(&user).unwrap();
-            sender.send(user).unwrap();
+            imported.remove(&user.clone()).unwrap();
+            let table_name = format!("answers_{}", user.clone());
+            let handle = bg.handle.table(&table_name).unwrap().into_sync();
+            sender.send((Arc::new(Mutex::new(handle)), user)).unwrap();
         }
         Ok(())
     };
