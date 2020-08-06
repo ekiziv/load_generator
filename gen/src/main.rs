@@ -4,6 +4,7 @@
 // It needs to be able to write to a specific table in Noria
 // It needs to poll specific views in Noria.
 #![feature(vec_remove_item)]
+#![feature(async_closure)]
 #[macro_use]
 extern crate slog;
 extern crate chrono;
@@ -376,11 +377,19 @@ fn do_every(
         }
         Ok(())
     };
+    let sample = move || -> Result<(), failure::Error> {
+        println!("hello!");
+        Ok(())
+    };
     let timer = valve.wrap(tokio::timer::Interval::new(Instant::now(), EVERY));
     let task = timer
-        .for_each(move |_| lease_action().map_err(|e| panic!("{:?}", e)))
+        .for_each(move |_| {
+            thread::spawn(move || sample());
+            futures::future::ok(())
+        })
         .map_err(|e| panic!("interval errorred with err {:?}", e));
     tokio::run(task);
+
     println!("LEASE DONE!");
 }
 
