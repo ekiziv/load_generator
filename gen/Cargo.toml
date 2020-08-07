@@ -29,6 +29,10 @@ crossbeam-channel = "0.4.3"
 futures = "0.1.16"
 stream-cancel = "0.4"
 failure = "0.1.1"
+chan = "0.1.19"
+threadpool = "1.0"
+
+
 
 
 

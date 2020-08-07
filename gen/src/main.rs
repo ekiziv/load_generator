@@ -7,6 +7,8 @@
 #![feature(async_closure)]
 #[macro_use]
 extern crate slog;
+#[macro_use]
+extern crate chan;
 extern crate chrono;
 extern crate crossbeam_queue;
 extern crate dashmap;
@@ -27,6 +29,7 @@ use slog::Logger;
 use slog_term::term_full;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use threadpool::ThreadPool;
 
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
@@ -51,7 +54,8 @@ pub struct NoriaBackend {
 
 const FACTOR: u64 = 5;
 const NUM_RQ: u64 = 1000;
-const EVERY: Duration = Duration::from_millis(50);
+const EVERY: Duration = Duration::from_millis(100);
+const NUM_THREADS: usize = 4;
 
 impl NoriaBackend {
     pub fn new() -> Result<NoriaBackend, std::io::Error> {
@@ -106,13 +110,9 @@ fn main() {
     let main_backend = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
     let (a_s1, a_r1) = unbounded();
     let (a_s2, a_r2) = (a_s1.clone(), a_r1.clone());
-    {
-        let mut bg = main_backend.lock().unwrap();
-        for name in names.clone().into_iter() {
-            let table_name = format!("answers_{}", name.clone());
-            let handle = bg.handle.table(&table_name).unwrap().into_sync();
-            a_s1.send((Arc::new(Mutex::new(handle)), name)).unwrap();
-        }
+
+    for name in names.clone().into_iter() {
+        a_s1.send((name, false)).unwrap();
     }
 
     let qids: Vec<u64> = (0..((FACTOR + 1) * NUM_RQ)).collect();
@@ -135,6 +135,7 @@ fn main() {
     let mut threads = Vec::new();
     let (tx, rx) = mpsc::channel(); // to communicate between read and write threads
     let (signal_sender, signal_receiver) = mpsc::channel(); // sends a signal once the first 1000 writes have been done
+    let (p, c) = chan::sync(1);
     let users = names.clone();
     let wid = thread::spawn(|| {
         write(
@@ -146,6 +147,7 @@ fn main() {
             a_s1,
             a_r2,
             signal_sender,
+            p,
         )
     });
 
@@ -164,6 +166,7 @@ fn main() {
             a_s2,
             a_r1,
             signal_receiver,
+            c,
         )
     });
     threads.push(tid);
@@ -181,9 +184,10 @@ fn write(
     qids: Vec<u64>,
     trigger: Trigger,
     backend: Arc<Mutex<NoriaBackend>>,
-    sender: Sender<(Arc<Mutex<SyncTable>>, String)>,
-    receiver: Receiver<(Arc<Mutex<SyncTable>>, String)>,
+    sender: Sender<(String, bool)>,
+    receiver: Receiver<(String, bool)>,
     signal: MPSCSender<bool>,
+    done: chan::Sender<bool>,
 ) {
     let mut handlers: HashMap<String, SyncTable> = {
         let mut bg = backend.lock().unwrap();
@@ -237,9 +241,16 @@ fn write(
         select! {
           recv(receiver) -> msg => {
             let info = msg.unwrap();
-            let raw_handle = info.0;
-            let mut handle = raw_handle.lock().unwrap();
-            let name = info.1;
+            let updated = info.1;
+            let name = info.0;
+            if updated {
+              // update the table handler in the hm
+              let table_name = format!("answers_{}", name.clone());
+              let handle = &mut bg.handle.table(&table_name).unwrap().into_sync();
+              handlers.insert(name.clone(), handle.clone());
+            }
+
+            let table = handlers.get_mut(&name).unwrap();
 
             let qid: &u64 = qids.choose(&mut rand::thread_rng()).unwrap();
             let answer: String = Sentence(5..7).fake();
@@ -252,14 +263,13 @@ fn write(
                 answer.clone().into(),
                 ts.into(),
             ];
-            handle
+            table
                 .insert(rec)
                 .expect("failed to insert into answers table");
 
             let tuple = (name.clone(), (*qid).clone());
             tx.send(tuple).unwrap();
-            drop(handle);
-            sender.send((raw_handle, name)).unwrap();
+            sender.send((name, false)).unwrap();
             i += 1;
           },
           default => println!("skipping a turn in write"),
@@ -316,81 +326,121 @@ fn do_every(
     backend: Arc<Mutex<NoriaBackend>>,
     map: HashMap<String, Vec<u32>>,
     names: Vec<String>,
-    valve: &Valve,
+    _valve: &Valve,
     view: SyncView,
-    sender: Sender<(Arc<Mutex<SyncTable>>, String)>,
-    receiver: Receiver<(Arc<Mutex<SyncTable>>, String)>,
-    signal: MPSCReceiver<bool>,
+    sender: Sender<(String, bool)>,
+    receiver: Receiver<(String, bool)>,
+    start: MPSCReceiver<bool>,
+    done: chan::Receiver<bool>,
 ) {
-    signal.recv().unwrap();
-    println!("Starting unsubscription!!!!");
-    let users_view = Arc::new(Mutex::new(view));
-    let imported = DashMap::new();
-
-    let to_resub = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
+    start.recv().unwrap();
+    let name_imported = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
     let info_map = Arc::new(Mutex::new(map));
 
     let lease_action = move || -> Result<(), failure::Error> {
+        println!("Lease action");
         let unsubscribe = flip_coin();
-        let mut bg = backend.lock().unwrap();
-        let to_re = to_resub.lock().unwrap();
-        let mut view = users_view.lock().unwrap();
-        let mut info_map = info_map.lock().unwrap();
-        let res = view.lookup(&[(0 as u64).into()], true).unwrap();
-        println!("Number of answers: {:?}", res.len());
-
+        let start = Instant::now();
         if unsubscribe {
             select! {
               recv(receiver) -> msg => {
                 let info = msg.unwrap();
-                let user = info.1;
-                let tables: Vec<u32> = info_map.remove(&user).unwrap();
-                let data = bg
-                    .handle
-                    .export_data(tables.clone())
-                    .expect("failed to export data from Noria");
-                imported.insert(user.to_string(), data);
-                for table in tables.into_iter() {
+                let user = info.0;
+
+                // get corresponding table ids
+                let tables: Vec<u32> = {
+                  let mut info_map = info_map.lock().unwrap();
+                  info_map.remove(&user).unwrap()
+                };
+
+                // get user's data and unsubscribe
+                let data = {
+                  let mut bg = backend.lock().unwrap();
+                  let data = bg
+                  .handle
+                  .export_data(tables.clone())
+                  .expect("failed to export data from Noria");
+                  for table in tables.into_iter() {
                     bg.handle
-                        .unsubscribe(table)
-                        .expect("failed to unsubscribe");
+                    .unsubscribe(table)
+                    .expect("failed to unsubscribe");
+                  }
+                  data
+                };
+
+                // push to ds that stores (name, data) to resubscribe
+                {
+                  let name_im = name_imported.lock().unwrap();
+                  name_im.push((user, data)).expect("failed to insert");
                 }
-                to_re.push(user).expect("failed to insert");
+
+                println!(
+                "func time unsub: {:?}",
+                Instant::now()
+                .checked_duration_since(start)
+                .unwrap()
+                .as_millis()
+                );
               },
               default() => println!("skipping turn"),
             }
         } else {
-            // resub case
-            if to_re.is_empty() {
+            let name_im = name_imported.lock().unwrap();
+            if name_im.is_empty() {
                 return Ok(());
             }
-            let user = to_re.pop().unwrap();
+            let (user, d) = name_im.pop().unwrap();
+            drop(name_im);
+
+            // import the data
+            let new_tables: Vec<u32> = {
+                let mut bg = backend.lock().unwrap();
+                bg.handle.import_data(d).unwrap()
+            };
+
             {
-                let data = imported.get(&user).unwrap();
-                let new_tables: Vec<u32> = bg.handle.import_data((*data).to_string()).unwrap();
+                let mut info_map = info_map.lock().unwrap();
                 info_map.insert(user.clone(), new_tables);
             }
-            imported.remove(&user.clone()).unwrap();
-            let table_name = format!("answers_{}", user.clone());
-            let handle = bg.handle.table(&table_name).unwrap().into_sync();
-            sender.send((Arc::new(Mutex::new(handle)), user)).unwrap();
+
+            sender.send((user, true)).unwrap();
+            println!(
+                "func time resub: {:?}",
+                Instant::now()
+                    .checked_duration_since(start)
+                    .unwrap()
+                    .as_millis()
+            );
         }
         Ok(())
     };
-    let sample = move || -> Result<(), failure::Error> {
-        println!("hello!");
-        Ok(())
-    };
-    let timer = valve.wrap(tokio::timer::Interval::new(Instant::now(), EVERY));
-    let task = timer
-        .for_each(move |_| {
-            thread::spawn(move || sample());
-            futures::future::ok(())
-        })
-        .map_err(|e| panic!("interval errorred with err {:?}", e));
-    tokio::run(task);
 
-    println!("LEASE DONE!");
+    let tick = chan::tick_ms(100);
+
+    let pool = ThreadPool::new(NUM_THREADS);
+    let mut cloned: Vec<_> = (0..5000)
+        .into_iter()
+        .map(|_| lease_action.clone())
+        .collect();
+    let mut count = 0;
+
+    loop {
+        chan_select! {
+          default => {},
+          tick.recv() => {
+            count += 1;
+            println!("time");
+            if count == 10 {
+              count =0 ;
+            }
+            let la = cloned.pop().unwrap();
+            pool.execute(move || {
+              async || la();
+            })
+          },
+          done.recv() => {drop(tick); pool.join(); println!("I am done!"); return},
+        }
+    }
 }
 
 fn flip_coin() -> bool {
