@@ -4,6 +4,7 @@
 // It needs to be able to write to a specific table in Noria
 // It needs to poll specific views in Noria.
 #![feature(vec_remove_item)]
+#![feature(async_closure)]
 #[macro_use]
 extern crate slog;
 #[macro_use]
@@ -54,7 +55,7 @@ pub struct NoriaBackend {
 const FACTOR: u64 = 5;
 const NUM_RQ: u64 = 1000;
 const EVERY: Duration = Duration::from_millis(100);
-const NUM_THREADS: usize = 6;
+const NUM_THREADS: usize = 4;
 
 impl NoriaBackend {
     pub fn new() -> Result<NoriaBackend, std::io::Error> {
@@ -333,122 +334,112 @@ fn do_every(
     done: chan::Receiver<bool>,
 ) {
     start.recv().unwrap();
-    println!("Starting unsubscription!!!!");
-    // let _users_view = Arc::new(Mutex::new(view));
-    let im = Arc::new(Mutex::new(DashMap::new()));
-
-    let to_resub = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
+    let name_imported = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
     let info_map = Arc::new(Mutex::new(map));
 
     let lease_action = move || -> Result<(), failure::Error> {
-        let start = Instant::now();
-        let mut bg = backend.lock().unwrap();
-
         println!("Lease action");
         let unsubscribe = flip_coin();
-        let to_re = to_resub.lock().unwrap();
-        let mut info_map = info_map.lock().unwrap();
-        let imported = im.lock().unwrap();
-        let half_time = Instant::now();
-        println!(
-            "half time: {:?}",
-            half_time.checked_duration_since(start).unwrap().as_millis()
-        );
+        let start = Instant::now();
         if unsubscribe {
             select! {
-                  recv(receiver) -> msg => {
-                    let info = msg.unwrap();
-                    let user = info.0;
-                    let tables: Vec<u32> = info_map.remove(&user).unwrap();
-                    let data = bg
-                        .handle
-                        .export_data(tables.clone())
-                        .expect("failed to export data from Noria");
-                    imported.insert(user.to_string(), data);
-                    for table in tables.into_iter() {
-                        bg.handle
-                            .unsubscribe(table)
-                            .expect("failed to unsubscribe");
-                    }
-                    to_re.push(user).expect("failed to insert");
-                    println!(
+              recv(receiver) -> msg => {
+                let info = msg.unwrap();
+                let user = info.0;
+
+                // get corresponding table ids
+                let tables: Vec<u32> = {
+                  let mut info_map = info_map.lock().unwrap();
+                  info_map.remove(&user).unwrap()
+                };
+
+                // get user's data and unsubscribe
+                let data = {
+                  let mut bg = backend.lock().unwrap();
+                  let data = bg
+                  .handle
+                  .export_data(tables.clone())
+                  .expect("failed to export data from Noria");
+                  for table in tables.into_iter() {
+                    bg.handle
+                    .unsubscribe(table)
+                    .expect("failed to unsubscribe");
+                  }
+                  data
+                };
+
+                // push to ds that stores (name, data) to resubscribe
+                {
+                  let name_im = name_imported.lock().unwrap();
+                  name_im.push((user, data)).expect("failed to insert");
+                }
+
+                println!(
                 "func time unsub: {:?}",
                 Instant::now()
-                    .checked_duration_since(half_time)
-                    .unwrap()
-                    .as_millis()
-            );
-                  },
-                  default() => println!("skipping turn"),
-                }
+                .checked_duration_since(start)
+                .unwrap()
+                .as_millis()
+                );
+              },
+              default() => println!("skipping turn"),
+            }
         } else {
-            // resub case
-            if to_re.is_empty() {
+            let name_im = name_imported.lock().unwrap();
+            if name_im.is_empty() {
                 return Ok(());
             }
-            let user = to_re.pop().unwrap();
+            let (user, d) = name_im.pop().unwrap();
+            drop(name_im);
+
+            // import the data
+            let new_tables: Vec<u32> = {
+                let mut bg = backend.lock().unwrap();
+                bg.handle.import_data(d).unwrap()
+            };
+
             {
-                let data = imported.get(&user).unwrap();
-                let new_tables: Vec<u32> = bg.handle.import_data((*data).to_string()).unwrap();
+                let mut info_map = info_map.lock().unwrap();
                 info_map.insert(user.clone(), new_tables);
             }
-            imported.remove(&user.clone()).unwrap();
+
             sender.send((user, true)).unwrap();
             println!(
-                "func time: {:?}",
+                "func time resub: {:?}",
                 Instant::now()
-                    .checked_duration_since(half_time)
+                    .checked_duration_since(start)
                     .unwrap()
                     .as_millis()
             );
         }
-
         Ok(())
     };
     let tick = chan::tick_ms(100);
-    let mut prev = Instant::now();
-    let mut count = 0;
-
-    // instantiate a bunch of threads
 
     let pool = ThreadPool::new(NUM_THREADS);
     let mut cloned: Vec<_> = (0..5000)
         .into_iter()
         .map(|_| lease_action.clone())
         .collect();
+    let mut count = 0;
 
     loop {
         chan_select! {
           default => {},
           tick.recv() => {
             count += 1;
+            println!("time");
             if count == 10 {
-              println!("___________________________________________________________________");
-              count = 0;
+              count =0 ;
             }
-            prev = Instant::now();
             let la = cloned.pop().unwrap();
             pool.execute(move || {
-              la().expect("failed to lease action");
+              async || la();
             })
           },
           done.recv() => {drop(tick); pool.join(); println!("I am done!"); return},
         }
     }
-
-    // let timer = valve.wrap(tokio::timer::Interval::new(Instant::now(), EVERY));
-    // let task = timer
-    //     .for_each(move |_| { tokio::spawn(move || )
-    //         {
-    //             println!("time: {:?}", Instant::now().checked_duration_since(prev));
-    //             prev = Instant::now();
-    //             lease_action()
-    //         }
-    //         .map_err(|e| panic!("{:?}", e))
-    //     })
-    //     .map_err(|e| panic!("interval errorred with err {:?}", e));
-    // tokio::run(task);
-    // println!("LEASE DONE!");
 }
 
 fn flip_coin() -> bool {
