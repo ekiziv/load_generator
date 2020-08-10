@@ -33,7 +33,6 @@ use threadpool::ThreadPool;
 
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
-use dashmap::DashMap;
 
 use rand::Rng;
 use std::fs::File;
@@ -52,10 +51,10 @@ pub struct NoriaBackend {
     pub runtime: tokio::runtime::Runtime,
 }
 
-const FACTOR: u64 = 5;
+const FACTOR: u64 = 2;
 const NUM_RQ: u64 = 1000;
 const EVERY: Duration = Duration::from_millis(100);
-const NUM_THREADS: usize = 4;
+const NUM_THREADS: usize = 1;
 
 impl NoriaBackend {
     pub fn new() -> Result<NoriaBackend, std::io::Error> {
@@ -135,7 +134,6 @@ fn main() {
     let mut threads = Vec::new();
     let (tx, rx) = mpsc::channel(); // to communicate between read and write threads
     let (signal_sender, signal_receiver) = mpsc::channel(); // sends a signal once the first 1000 writes have been done
-    let (p, c) = chan::sync(1);
     let users = names.clone();
     let wid = thread::spawn(|| {
         write(
@@ -147,7 +145,6 @@ fn main() {
             a_s1,
             a_r2,
             signal_sender,
-            p,
         )
     });
 
@@ -162,11 +159,9 @@ fn main() {
             info_map,
             names.clone(),
             &valve,
-            users_view,
             a_s2,
             a_r1,
             signal_receiver,
-            c,
         )
     });
     threads.push(tid);
@@ -187,7 +182,6 @@ fn write(
     sender: Sender<(String, bool)>,
     receiver: Receiver<(String, bool)>,
     signal: MPSCSender<bool>,
-    done: chan::Sender<bool>,
 ) {
     let mut handlers: HashMap<String, SyncTable> = {
         let mut bg = backend.lock().unwrap();
@@ -236,6 +230,7 @@ fn write(
     println!("__________________________________________________________");
     i = 0;
     signal.send(true).unwrap();
+
     while i <= FACTOR * NUM_RQ {
         // let name = names.choose(&mut rand::thread_rng()).unwrap();
         select! {
@@ -326,20 +321,26 @@ fn do_every(
     backend: Arc<Mutex<NoriaBackend>>,
     map: HashMap<String, Vec<u32>>,
     names: Vec<String>,
-    _valve: &Valve,
-    view: SyncView,
+    valve: &Valve,
     sender: Sender<(String, bool)>,
     receiver: Receiver<(String, bool)>,
     start: MPSCReceiver<bool>,
-    done: chan::Receiver<bool>,
 ) {
     start.recv().unwrap();
     let name_imported = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
     let info_map = Arc::new(Mutex::new(map));
+    let mut thread_ex = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open("thread_experiment.txt")
+        .unwrap();
+    let fd = Arc::new(Mutex::new(thread_ex));
 
     let lease_action = move || -> Result<(), failure::Error> {
         println!("Lease action");
-        let unsubscribe = flip_coin();
+        let mut rng = rand::thread_rng();
+        let x: f64 = rng.gen();
+        let unsubscribe = if x < 0.5 { true } else { false };
         let start = Instant::now();
         if unsubscribe {
             select! {
@@ -374,13 +375,13 @@ fn do_every(
                   name_im.push((user, data)).expect("failed to insert");
                 }
 
-                println!(
-                "func time unsub: {:?}",
-                Instant::now()
-                .checked_duration_since(start)
-                .unwrap()
-                .as_millis()
-                );
+                // println!(
+                // "func time unsub: {:?}",
+                // Instant::now()
+                // .checked_duration_since(start)
+                // .unwrap()
+                // .as_millis()
+                // );
               },
               default() => println!("skipping turn"),
             }
@@ -404,51 +405,73 @@ fn do_every(
             }
 
             sender.send((user, true)).unwrap();
-            println!(
-                "func time resub: {:?}",
-                Instant::now()
-                    .checked_duration_since(start)
-                    .unwrap()
-                    .as_millis()
-            );
+            // println!(
+            //     "func time resub: {:?}",
+            //     Instant::now()
+            //         .checked_duration_since(start)
+            //         .unwrap()
+            //         .as_millis()
+            // );
         }
+        write!(
+            &mut fd.lock().unwrap(),
+            "{}\n",
+            Instant::now()
+                .checked_duration_since(start)
+                .unwrap()
+                .as_millis()
+        )
+        .expect("failed to write into thread file");
+
         Ok(())
     };
-
-    let tick = chan::tick_ms(100);
 
     let pool = ThreadPool::new(NUM_THREADS);
     let mut cloned: Vec<_> = (0..5000)
         .into_iter()
         .map(|_| lease_action.clone())
         .collect();
+
+    let mut prev = Instant::now();
     let mut count = 0;
 
-    loop {
-        chan_select! {
-          default => {},
-          tick.recv() => {
+    let timer = valve.wrap(tokio::timer::Interval::new(Instant::now(), EVERY));
+    let task = timer
+        .for_each(move |_| {
+            let now = Instant::now();
+            println!(
+                "time since prev: {:?}",
+                now.checked_duration_since(prev).unwrap().as_millis()
+            );
             count += 1;
-            println!("time");
             if count == 10 {
-              count =0 ;
+                println!("__________________________________________________________");
+                count = 0;
             }
+            prev = now;
             let la = cloned.pop().unwrap();
-            pool.execute(move || {
-              async || la();
-            })
-          },
-          done.recv() => {drop(tick); pool.join(); println!("I am done!"); return},
-        }
-    }
-}
+            pool.execute(move || la().expect("failed to lease action"));
+            futures::future::ok(())
+        })
+        .map_err(|e| panic!("interval errorred with err {:?}", e));
+    tokio::run(task);
+    println!("LEASE DONE!");
 
-fn flip_coin() -> bool {
-    let mut rng = rand::thread_rng();
-    let x: f64 = rng.gen();
-    if x < 0.5 {
-        true
-    } else {
-        false
-    }
+    // loop {
+    //     chan_select! {
+    //       default => {},
+    //       tick.recv() => {
+    //         count += 1;
+    //         println!("time");
+    //         if count == 10 {
+    //           count =0 ;
+    //         }
+    //         let la = cloned.pop().unwrap();
+    //         pool.execute(move || {
+    //            la().expect("failed to lease action");
+    //         })
+    //       },
+    //       done.recv() => {drop(tick); pool.join(); println!("I am done!"); return},
+    //     }
+    // }
 }

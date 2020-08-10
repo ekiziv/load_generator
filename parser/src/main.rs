@@ -1,4 +1,6 @@
+extern crate hdrhistogram;
 use chrono::{NaiveDateTime, Utc};
+use hdrhistogram::Histogram;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -15,6 +17,13 @@ fn main() {
         .create(true)
         .open("intervals.txt")
         .unwrap();
+    let mut cdf = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open("cdf.txt")
+        .unwrap();
+
+    let mut hist = Histogram::<u64>::new(1).unwrap();
 
     // // read the times when the unsubscription happens
     // let (un_start, un_end) = extract_action_time_interval(
@@ -27,7 +36,8 @@ fn main() {
     // get all the end_times
     let mut end_times: Vec<(NaiveDateTime, NaiveDateTime)> = Vec::new();
     let buffered_end_times = BufReader::new(
-        File::open("/Users/eleonorakiziv/rust/websubmit-rs/load_generator/end_times.txt").unwrap(),
+        File::open("/Users/eleonorakiziv/rust/load_generator/load_generator/end_times.txt")
+            .unwrap(),
     );
     for line in buffered_end_times.lines() {
         let unwrapped = line.unwrap().clone();
@@ -60,6 +70,8 @@ fn main() {
         }
         prev = start;
         let latency = end.signed_duration_since(start).num_milliseconds();
+        hist += latency as u64;
+
         // if un_start < start {
         //     if !start_un_recorded {
         //         write!(&mut latency_file, "{}\n", 0).expect("failed to write into latency file");
@@ -94,6 +106,17 @@ fn main() {
 
         write!(&mut latency_file, "{}\n", latency).expect("failed to write into latency file");
         write!(&mut interval_file, "{}\n", interval).expect("failed to write into interval file");
+    }
+    println!("# of samples: {}", hist.len());
+    println!("95'th percentile: {}", hist.value_at_quantile(0.95));
+    for v in hist.iter_recorded() {
+        write!(
+            &mut cdf,
+            "{}:{}\n",
+            v.percentile(),
+            v.value_iterated_to() // v.count_at_value()
+        )
+        .expect("failed to write to cdf");
     }
 }
 
