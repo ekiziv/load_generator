@@ -6,6 +6,7 @@ cargo-features = ["profile-overrides"]
 members = [
   "gen",
   "parser",
+"counter", 
 ]
 
 [patch.'https://github.com/tower-rs/tokio-tower.git']

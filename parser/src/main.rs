@@ -36,7 +36,7 @@ fn main() {
     // get all the end_times
     let mut end_times: Vec<(NaiveDateTime, NaiveDateTime)> = Vec::new();
     let buffered_end_times = BufReader::new(
-        File::open("/Users/eleonorakiziv/rust/load_generator/load_generator/end_times.txt")
+        File::open("/home/ekiziv/load_generator/end_times.txt")
             .unwrap(),
     );
     for line in buffered_end_times.lines() {
@@ -46,11 +46,15 @@ fn main() {
         if end.is_none() {
             continue;
         }
-        let start_time = NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S%.f")
-            .expect("failed to parse from string");
-        let end_time = NaiveDateTime::parse_from_str(end.unwrap(), "%Y-%m-%dT%H:%M:%S%.f")
-            .expect("failed to parse from string");
-        end_times.push((start_time, end_time));
+        let start_time = NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S%.f"); 
+        if start_time.is_err() {
+            continue; 
+        }
+        let end_time = NaiveDateTime::parse_from_str(end.unwrap(), "%Y-%m-%dT%H:%M:%S%.f"); 
+        if end_time.is_err() {
+            continue; 
+        }
+        end_times.push((start_time.unwrap(), end_time.unwrap()));
     }
 
     let mut prev = end_times[0].0;
@@ -112,9 +116,10 @@ fn main() {
     for v in hist.iter_recorded() {
         write!(
             &mut cdf,
-            "{}:{}\n",
+            "{}*{}*{}\n", 
+            v.value_iterated_to(),
             v.percentile(),
-            v.value_iterated_to() // v.count_at_value()
+            v.count_at_value()
         )
         .expect("failed to write to cdf");
     }

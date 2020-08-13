@@ -2,3 +2,7 @@
 **/*.rs.bk
 .idea/
 *.txt
+*.svg
+Flamegraph/*
+rust-unmangle/*
+.profile

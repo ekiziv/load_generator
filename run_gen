@@ -1,0 +1,9 @@
+#!/bin/bash
+
+rm cdf.txt
+rm thread_experiment.txt
+rm intervals.txt
+rm latency.txt
+rm end_times.txt
+rm cdf.txt
+RUST_BACKTRACE=full cargo run --release -p gen &> output.txt 

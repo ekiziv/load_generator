@@ -53,8 +53,8 @@ pub struct NoriaBackend {
 
 const FACTOR: u64 = 2;
 const NUM_RQ: u64 = 1000;
-const EVERY: Duration = Duration::from_millis(100);
-const NUM_THREADS: usize = 1;
+const EVERY: Duration = Duration::from_millis(5);
+const NUM_THREADS: usize = 4;
 
 impl NoriaBackend {
     pub fn new() -> Result<NoriaBackend, std::io::Error> {
@@ -67,9 +67,7 @@ impl NoriaBackend {
         let executor = rt.executor();
         let mut ch = SyncControllerHandle::new(zk_auth, executor.clone())
             .expect("failed to connect to Noria controller");
-        println!("Looking for inputs");
         let inputs = ch.inputs().expect("couldn't get inputs from Noria");
-        println!("inputs: {:?}", inputs);
         Ok(NoriaBackend {
             handle: ch,
             executor: executor,
@@ -81,7 +79,7 @@ impl NoriaBackend {
 fn main() {
     let mut names: Vec<String> = Vec::new();
     let buffered = BufReader::new(
-        File::open("/Users/eleonorakiziv/rust/websubmit-rs/websubmit-rs/info.txt").unwrap(),
+        File::open("/home/ekiziv/websubmit-rs/info.txt").unwrap(),
     );
     let mut info_map = HashMap::new();
     for line in buffered.lines() {
@@ -170,7 +168,6 @@ fn main() {
     for thread in threads {
         thread.join().expect("oops! the child thread panicked");
     }
-    println!("I am officially done!");
 }
 
 fn write(
@@ -225,9 +222,6 @@ fn write(
         tx.send(tuple).unwrap();
         i += 1;
     }
-    println!("__________________________________________________________");
-    println!("Start unsubscription");
-    println!("__________________________________________________________");
     i = 0;
     signal.send(true).unwrap();
 
@@ -270,7 +264,6 @@ fn write(
           default => println!("skipping a turn in write"),
         }
     }
-    println!("WRITE DONE!");
 
     drop(trigger);
 }
@@ -303,7 +296,6 @@ fn read(rx: MPSCReceiver<(String, u64)>, view: &mut SyncView) {
             });
         i += 1;
     }
-    println!("READ DONE!");
 
     end_times.sort_by_key(|k| k.0);
     let mut file = OpenOptions::new()
@@ -326,8 +318,6 @@ fn do_every(
     receiver: Receiver<(String, bool)>,
     start: MPSCReceiver<bool>,
 ) {
-    start.recv().unwrap();
-    let name_imported = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
     let info_map = Arc::new(Mutex::new(map));
     let mut thread_ex = OpenOptions::new()
         .write(true)
@@ -335,6 +325,8 @@ fn do_every(
         .open("thread_experiment.txt")
         .unwrap();
     let fd = Arc::new(Mutex::new(thread_ex));
+    let name_imported = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
+    start.recv().unwrap();
 
     let lease_action = move || -> Result<(), failure::Error> {
         println!("Lease action");
@@ -432,30 +424,20 @@ fn do_every(
         .map(|_| lease_action.clone())
         .collect();
 
-    let mut prev = Instant::now();
-    let mut count = 0;
-
+    let mut c = 0;  
     let timer = valve.wrap(tokio::timer::Interval::new(Instant::now(), EVERY));
     let task = timer
         .for_each(move |_| {
             let now = Instant::now();
-            println!(
-                "time since prev: {:?}",
-                now.checked_duration_since(prev).unwrap().as_millis()
-            );
-            count += 1;
-            if count == 10 {
-                println!("__________________________________________________________");
-                count = 0;
-            }
-            prev = now;
+            c += 1;
+            println!("timer: {}", c); 
             let la = cloned.pop().unwrap();
             pool.execute(move || la().expect("failed to lease action"));
             futures::future::ok(())
         })
         .map_err(|e| panic!("interval errorred with err {:?}", e));
     tokio::run(task);
-    println!("LEASE DONE!");
+
 
     // loop {
     //     chan_select! {
@@ -475,3 +457,4 @@ fn do_every(
     //     }
     // }
 }
+
