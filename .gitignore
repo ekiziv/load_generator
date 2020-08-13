@@ -6,3 +6,7 @@
 Flamegraph/*
 rust-unmangle/*
 .profile
+debug/
+release/
+cdfs/
+new/

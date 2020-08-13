@@ -4,37 +4,27 @@
 // It needs to be able to write to a specific table in Noria
 // It needs to poll specific views in Noria.
 #![feature(vec_remove_item)]
-#![feature(async_closure)]
-#[macro_use]
-extern crate slog;
-#[macro_use]
-extern crate chan;
+
 extern crate chrono;
 extern crate crossbeam_queue;
-extern crate dashmap;
+extern crate gen;
 extern crate rand;
 extern crate slog_term;
 extern crate stream_cancel;
 
 use chrono::Local;
 use chrono::NaiveDateTime;
-use fake::Fake;
-use futures::{self, Future, Stream};
-use noria::prelude::SyncTable;
-use noria::{DataType, SyncView};
-use noria::{SyncControllerHandle, ZookeeperAuthority};
-use rand::seq::SliceRandom;
-use slog::Drain;
-use slog::Logger;
-use slog_term::term_full;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use threadpool::ThreadPool;
-
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
-
+use fake::Fake;
+use futures::{self, Future, Stream};
+use gen::NoriaBackend;
+use gen::ThreadPool;
+use noria::prelude::SyncTable;
+use noria::{DataType, SyncView};
+use rand::seq::SliceRandom;
 use rand::Rng;
+use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -43,44 +33,17 @@ use std::sync::mpsc;
 use std::sync::mpsc::{Receiver as MPSCReceiver, Sender as MPSCSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 use stream_cancel::{Trigger, Valve};
 
-pub struct NoriaBackend {
-    pub handle: SyncControllerHandle<ZookeeperAuthority, tokio::runtime::TaskExecutor>,
-    pub executor: tokio::runtime::TaskExecutor,
-    pub runtime: tokio::runtime::Runtime,
-}
-
-const FACTOR: u64 = 2;
+const FACTOR: u64 = 5;
 const NUM_RQ: u64 = 1000;
-const EVERY: Duration = Duration::from_millis(5);
+const EVERY: Duration = Duration::from_millis(100);
 const NUM_THREADS: usize = 4;
-
-impl NoriaBackend {
-    pub fn new() -> Result<NoriaBackend, std::io::Error> {
-        let log = Logger::root(Mutex::new(term_full()).fuse(), o!());
-        let zk_auth = ZookeeperAuthority::new("127.0.0.1:2181/hello")
-            .expect("failed to connect to Zookeeper");
-
-        debug!(log, "Connecting to Noria...");
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let executor = rt.executor();
-        let mut ch = SyncControllerHandle::new(zk_auth, executor.clone())
-            .expect("failed to connect to Noria controller");
-        let inputs = ch.inputs().expect("couldn't get inputs from Noria");
-        Ok(NoriaBackend {
-            handle: ch,
-            executor: executor,
-            runtime: rt,
-        })
-    }
-}
 
 fn main() {
     let mut names: Vec<String> = Vec::new();
-    let buffered = BufReader::new(
-        File::open("/home/ekiziv/websubmit-rs/info.txt").unwrap(),
-    );
+    let buffered = BufReader::new(File::open("/home/ekiziv/websubmit-rs/info.txt").unwrap());
     let mut info_map = HashMap::new();
     for line in buffered.lines() {
         let l = line.unwrap().to_string();
@@ -102,7 +65,6 @@ fn main() {
     }
 
     // instantiate Noria
-    let lease_backend = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
     let write_backend = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
     let main_backend = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
     let (a_s1, a_r1) = unbounded();
@@ -123,11 +85,6 @@ fn main() {
             .into_sync()
     };
 
-    // check how many answers there are altogether
-    let users_view: SyncView = {
-        let mut bg = lease_backend.lock().unwrap();
-        bg.handle.view("answers_by_lec").unwrap().into_sync()
-    };
     let (trigger, valve) = Valve::new(); // to stop the ticker in lease thread
     let mut threads = Vec::new();
     let (tx, rx) = mpsc::channel(); // to communicate between read and write threads
@@ -152,15 +109,7 @@ fn main() {
     threads.push(rid);
 
     let tid = thread::spawn(move || {
-        do_every(
-            lease_backend,
-            info_map,
-            names.clone(),
-            &valve,
-            a_s2,
-            a_r1,
-            signal_receiver,
-        )
+        do_every(info_map, names.clone(), &valve, a_s2, a_r1, signal_receiver)
     });
     threads.push(tid);
 
@@ -310,7 +259,6 @@ fn read(rx: MPSCReceiver<(String, u64)>, view: &mut SyncView) {
 }
 
 fn do_every(
-    backend: Arc<Mutex<NoriaBackend>>,
     map: HashMap<String, Vec<u32>>,
     names: Vec<String>,
     valve: &Valve,
@@ -319,7 +267,8 @@ fn do_every(
     start: MPSCReceiver<bool>,
 ) {
     let info_map = Arc::new(Mutex::new(map));
-    let mut thread_ex = OpenOptions::new()
+
+    let thread_ex = OpenOptions::new()
         .write(true)
         .create(true)
         .open("thread_experiment.txt")
@@ -328,7 +277,7 @@ fn do_every(
     let name_imported = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
     start.recv().unwrap();
 
-    let lease_action = move || -> Result<(), failure::Error> {
+    let lease_action = move |backend: Arc<Mutex<NoriaBackend>>| -> Result<(), failure::Error> {
         println!("Lease action");
         let mut rng = rand::thread_rng();
         let x: f64 = rng.gen();
@@ -418,43 +367,29 @@ fn do_every(
         Ok(())
     };
 
-    let pool = ThreadPool::new(NUM_THREADS);
+    let mut conn_vec = Vec::with_capacity(NUM_THREADS);
+    for _ in 0..NUM_THREADS {
+        let conn = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
+        conn_vec.push(conn);
+    }
+    let pool = ThreadPool::new(NUM_THREADS, conn_vec);
     let mut cloned: Vec<_> = (0..5000)
         .into_iter()
         .map(|_| lease_action.clone())
         .collect();
 
-    let mut c = 0;  
+    let mut c = 0;
     let timer = valve.wrap(tokio::timer::Interval::new(Instant::now(), EVERY));
     let task = timer
         .for_each(move |_| {
             let now = Instant::now();
             c += 1;
-            println!("timer: {}", c); 
+            println!("timer: {}", c);
             let la = cloned.pop().unwrap();
-            pool.execute(move || la().expect("failed to lease action"));
+
+            pool.execute(move |conn| la(conn).expect("failed closure"));
             futures::future::ok(())
         })
         .map_err(|e| panic!("interval errorred with err {:?}", e));
     tokio::run(task);
-
-
-    // loop {
-    //     chan_select! {
-    //       default => {},
-    //       tick.recv() => {
-    //         count += 1;
-    //         println!("time");
-    //         if count == 10 {
-    //           count =0 ;
-    //         }
-    //         let la = cloned.pop().unwrap();
-    //         pool.execute(move || {
-    //            la().expect("failed to lease action");
-    //         })
-    //       },
-    //       done.recv() => {drop(tick); pool.join(); println!("I am done!"); return},
-    //     }
-    // }
 }
-
