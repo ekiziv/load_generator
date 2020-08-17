@@ -35,11 +35,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use stream_cancel::{Trigger, Valve};
+use std::io::BufWriter; 
 
 const FACTOR: u64 = 5;
 const NUM_RQ: u64 = 1000;
-const EVERY: Duration = Duration::from_millis(100);
-const NUM_THREADS: usize = 4;
+const EVERY: Duration = Duration::from_millis(10);
+const NUM_THREADS: usize = 3;
 
 fn main() {
     let mut names: Vec<String> = Vec::new();
@@ -174,7 +175,7 @@ fn write(
     i = 0;
     signal.send(true).unwrap();
 
-    while i <= FACTOR * NUM_RQ {
+    while i < FACTOR * NUM_RQ {
         // let name = names.choose(&mut rand::thread_rng()).unwrap();
         select! {
           recv(receiver) -> msg => {
@@ -210,10 +211,10 @@ fn write(
             sender.send((name, false)).unwrap();
             i += 1;
           },
-          default => println!("skipping a turn in write"),
+          default => {println!("skipping the turn")},
         }
-    }
-
+    } 
+    println!("WRITE DONE"); 
     drop(trigger);
 }
 
@@ -273,12 +274,19 @@ fn do_every(
         .create(true)
         .open("thread_experiment.txt")
         .unwrap();
-    let fd = Arc::new(Mutex::new(thread_ex));
+    let fd = Arc::new(Mutex::new(BufWriter::new(thread_ex)));
     let name_imported = Arc::new(Mutex::new(ArrayQueue::new(names.len())));
-    start.recv().unwrap();
+    
+    let mut conn_vec = Vec::with_capacity(NUM_THREADS);
+    for _ in 0..NUM_THREADS {
+        let conn = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
+        conn_vec.push(conn);
+    }
+    let pool = ThreadPool::new(NUM_THREADS, conn_vec);
+     start.recv().unwrap();
 
     let lease_action = move |backend: Arc<Mutex<NoriaBackend>>| -> Result<(), failure::Error> {
-        println!("Lease action");
+       // println!("Lease action!");  
         let mut rng = rand::thread_rng();
         let x: f64 = rng.gen();
         let unsubscribe = if x < 0.5 { true } else { false };
@@ -315,16 +323,8 @@ fn do_every(
                   let name_im = name_imported.lock().unwrap();
                   name_im.push((user, data)).expect("failed to insert");
                 }
-
-                // println!(
-                // "func time unsub: {:?}",
-                // Instant::now()
-                // .checked_duration_since(start)
-                // .unwrap()
-                // .as_millis()
-                // );
               },
-              default() => println!("skipping turn"),
+              default() => {},
             }
         } else {
             let name_im = name_imported.lock().unwrap();
@@ -346,45 +346,23 @@ fn do_every(
             }
 
             sender.send((user, true)).unwrap();
-            // println!(
-            //     "func time resub: {:?}",
-            //     Instant::now()
-            //         .checked_duration_since(start)
-            //         .unwrap()
-            //         .as_millis()
-            // );
         }
-        write!(
-            &mut fd.lock().unwrap(),
-            "{}\n",
-            Instant::now()
-                .checked_duration_since(start)
-                .unwrap()
-                .as_millis()
-        )
-        .expect("failed to write into thread file");
-
+        let func_latency = Instant::now().checked_duration_since(start).unwrap().as_millis(); 
+        fd.lock().unwrap().write(format!("{}\n", func_latency).as_bytes()); 
         Ok(())
     };
 
-    let mut conn_vec = Vec::with_capacity(NUM_THREADS);
-    for _ in 0..NUM_THREADS {
-        let conn = Arc::new(Mutex::new(NoriaBackend::new().unwrap()));
-        conn_vec.push(conn);
-    }
-    let pool = ThreadPool::new(NUM_THREADS, conn_vec);
-    let mut cloned: Vec<_> = (0..5000)
+    let mut cloned: Vec<_> = (0..FACTOR*2*2*2*NUM_RQ)
         .into_iter()
         .map(|_| lease_action.clone())
         .collect();
-
     let mut c = 0;
+    
     let timer = valve.wrap(tokio::timer::Interval::new(Instant::now(), EVERY));
     let task = timer
         .for_each(move |_| {
-            let now = Instant::now();
             c += 1;
-            println!("timer: {}", c);
+        //    println!("timer: {}", c); 
             let la = cloned.pop().unwrap();
 
             pool.execute(move |conn| la(conn).expect("failed closure"));
@@ -392,4 +370,5 @@ fn do_every(
         })
         .map_err(|e| panic!("interval errorred with err {:?}", e));
     tokio::run(task);
+    println!("timer is {}", c); 
 }
