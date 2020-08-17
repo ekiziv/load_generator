@@ -3,12 +3,11 @@ use noria::SyncControllerHandle;
 use slog::Drain;
 use slog::Logger;
 use slog_term::term_full;
-
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 #[macro_use]
 extern crate slog;
-
 pub struct NoriaBackend {
     pub handle: SyncControllerHandle<ZookeeperAuthority, tokio::runtime::TaskExecutor>,
     pub executor: tokio::runtime::TaskExecutor,
@@ -26,9 +25,7 @@ impl NoriaBackend {
         let executor = rt.executor();
         let mut ch = SyncControllerHandle::new(zk_auth, executor.clone())
             .expect("failed to connect to Noria controller");
-        println!("Looking for inputs");
         let inputs = ch.inputs().expect("couldn't get inputs from Noria");
-        println!("inputs: {:?}", inputs);
         Ok(NoriaBackend {
             handle: ch,
             executor: executor,
@@ -45,6 +42,7 @@ pub enum Message {
 pub struct ThreadPool {
     workers: Vec<Worker>,
     sender: mpsc::Sender<Message>,
+    done: Arc<Mutex<AtomicBool>>, 
 }
 
 type Job = Box<FnBox + Send + 'static>;
@@ -72,14 +70,15 @@ impl ThreadPool {
         let mut workers = Vec::with_capacity(size);
         let (sender, receiver) = mpsc::channel();
         let receiver = Arc::new(Mutex::new(receiver));
+        let done = Arc::new(Mutex::new(AtomicBool::new(false)));
         for id in 0..size {
             // create some threads and store them in the vector
             let conn = conn_vec.pop().unwrap();
-            let worker = Worker::new(id, receiver.clone(), conn);
+            let worker = Worker::new(id, receiver.clone(), conn, done.clone());
             workers.push(worker);
         }
 
-        ThreadPool { workers, sender }
+        ThreadPool { workers, sender, done,  }
     }
 
     pub fn execute<F>(&self, f: F)
@@ -101,17 +100,25 @@ impl Worker {
         id: usize,
         receiver: Arc<Mutex<mpsc::Receiver<Message>>>,
         conn: Arc<Mutex<NoriaBackend>>,
+        done: Arc<Mutex<AtomicBool>>, 
     ) -> Worker {
-        let thread = thread::spawn(move || loop {
-            let message = receiver.lock().unwrap().recv().unwrap();
+
+        let thread = thread::spawn(move ||  
+        loop {     
+            if done.lock().unwrap().load(Ordering::Relaxed) == true {
+                break; 
+            }
+            let message = {
+                let r = receiver.lock().unwrap(); 
+                r.recv().unwrap()
+            };
 
             match message {
-                Message::NewJob(job) => {
-                    println!("Worker {} got a job; executing.", id);
+                Message::NewJob(job) => { 
+                    
                     job.call_box(conn.clone());
                 }
                 Message::Terminate => {
-                    println!("Worker {} was told to Terminate", id);
                     break;
                 }
             }
@@ -125,13 +132,11 @@ impl Worker {
 
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        println!("Sending terminate messages to all workers");
-
         for _ in &mut self.workers {
             self.sender.send(Message::Terminate).unwrap();
         }
 
-        println!("Shutting down all workers");
+        self.done.lock().unwrap().store(true, Ordering::Relaxed); 
 
         for worker in &mut self.workers {
             println!("Shutting doen worker {}", worker.id);
